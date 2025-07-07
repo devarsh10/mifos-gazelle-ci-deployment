@@ -54,19 +54,30 @@ jobs:
             echo "Creating KinD cluster..."
             # Create a KinD cluster. This will run Kubernetes inside a Docker container.
             # Using --wait to ensure the cluster is ready before proceeding.
-            # Using --config to specify a custom config for more memory/CPUs if needed,
-            # but for now, default should be fine, or we can add a simple config.yaml.
-            # For now, let's keep it simple.
             kind create cluster --name mifos-gazelle-cluster --wait 300s # Wait up to 5 minutes
 
             echo "Setting KUBECONFIG for KinD cluster..."
-            # Get the kubeconfig for the KinD cluster and set it as the default
-            kind get kubeconfig --name mifos-gazelle-cluster > ~/.kube/config
+            mkdir -p ~/.kube
+            # Get the kubeconfig for the KinD cluster
+            kind get kubeconfig --name mifos-gazelle-cluster > ~/.kube/config.tmp
+
+            # Extract the IP address from the DOCKER_HOST environment variable
+            # DOCKER_HOST is typically in the format tcp://<IP>:<PORT>
+            DOCKER_IP=$(echo $DOCKER_HOST | sed -E 's/tcp:\/\/(.*):.*/\1/')
+            echo "Detected DOCKER_IP: $DOCKER_IP"
+
+            # Replace 127.0.0.1 in the kubeconfig with the DOCKER_IP
+            # This ensures kubectl connects to the remote Docker daemon's IP where KinD is running
+            sed -i "s/server: https:\/\/127.0.0.1:/server: https:\/\/$DOCKER_IP:/g" ~/.kube/config.tmp
+
+            # Move the modified kubeconfig to the final location
+            mv ~/.kube/config.tmp ~/.kube/config
             chmod 600 ~/.kube/config
             export KUBECONFIG=~/.kube/config
             echo "KUBECONFIG set to $KUBECONFIG"
 
             echo "Verifying KinD cluster nodes..."
+            # Now kubectl should be able to connect to the KinD cluster
             kubectl get nodes
 
       - run:
