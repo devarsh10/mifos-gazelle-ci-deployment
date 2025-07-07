@@ -20,99 +20,54 @@ jobs:
           docker_layer_caching: true # Enable Docker layer caching for faster builds
 
       - run:
-          name: Install Dependencies (Docker, Docker Compose, Kubectl, K3s)
+          name: Install Dependencies (Docker Compose, Kubectl, KinD)
           command: |
             echo "Updating apt package list..."
             sudo apt-get update -y
 
-            echo "Installing necessary packages for Docker..."
-            sudo apt-get install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common
-
-            echo "Adding Docker's official GPG key..."
-            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-
-            echo "Setting up the stable Docker repository..."
-            sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-
-            echo "Updating apt package list again after adding Docker repo..."
-            sudo apt-get update -y
-
-            echo "Installing Docker CE CLI and Containerd..."
-            # Docker daemon is handled by setup_remote_docker, but we ensure the CLI is available
-            sudo apt-get install -y docker-ce-cli containerd.io
+            echo "Installing necessary packages..."
+            sudo apt-get install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common jq
 
             echo "Installing Docker Compose (version 1.29.2)..."
             sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
             sudo chmod +x /usr/local/bin/docker-compose
 
             echo "Verifying Docker and Docker Compose installation..."
-            docker --version
+            docker --version # Docker daemon is provided by setup_remote_docker
             docker-compose --version
 
-            echo "Installing K3s (lightweight Kubernetes cluster)..."
-            # Install k3s, make kubeconfig readable by non-root, and prevent it from starting as a service immediately
-            # We'll start it manually in the next step.
-            # Set K3S_KUBECONFIG_MODE to ensure the kubeconfig file is readable.
-            # The --docker flag will be used when starting the server, so no need for snapshotter here.
-            curl -sfL https://get.k3s.io | INSTALL_K3S_SKIP_ENABLE=true K3S_KUBECONFIG_MODE="644" sh -
-
             echo "Installing kubectl (Kubernetes command-line tool)..."
-            # K3s installs its own kubectl, but we ensure the standard one is available and linked
-            # The K3s install script should have already symlinked kubectl to /usr/local/bin/kubectl
+            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
             kubectl version --client
 
+            echo "Installing KinD (Kubernetes in Docker)..."
+            # For AMD64 / x86_64
+            [ $(uname -m) = x86_64 ] && curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
+            chmod +x ./kind
+            sudo mv ./kind /usr/local/bin/kind
+            kind version
+
       - run:
-          name: Start K3s Cluster
+          name: Create KinD Cluster
           command: |
-            echo "Setting up KUBECONFIG..."
-            mkdir -p ~/.kube
+            echo "Creating KinD cluster..."
+            # Create a KinD cluster. This will run Kubernetes inside a Docker container.
+            # Using --wait to ensure the cluster is ready before proceeding.
+            # Using --config to specify a custom config for more memory/CPUs if needed,
+            # but for now, default should be fine, or we can add a simple config.yaml.
+            # For now, let's keep it simple.
+            kind create cluster --name mifos-gazelle-cluster --wait 300s # Wait up to 5 minutes
 
-            echo "Starting K3s server with Docker runtime..."
-            # Start k3s server in the background, using the Docker daemon provided by setup_remote_docker
-            sudo k3s server --docker &
-
-            echo "Waiting for k3s.yaml to be created..."
-            # Wait for the k3s.yaml file to appear, up to 60 seconds
-            timeout 60s bash -c '
-              for i in $(seq 1 6); do
-                if [ -f /etc/rancher/k3s/k3s.yaml ]; then
-                  echo "k3s.yaml found."
-                  break
-                else
-                  echo "Attempt $i: k3s.yaml not found yet. Retrying in 10 seconds..."
-                  sleep 10
-                fi
-                if [ $i -eq 6 ]; then
-                  echo "Timeout: k3s.yaml did not appear after 60 seconds."
-                  exit 1
-                fi
-              done
-            '
-            sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
-            sudo chmod 600 ~/.kube/config
+            echo "Setting KUBECONFIG for KinD cluster..."
+            # Get the kubeconfig for the KinD cluster and set it as the default
+            kind get kubeconfig --name mifos-gazelle-cluster > ~/.kube/config
+            chmod 600 ~/.kube/config
             export KUBECONFIG=~/.kube/config
             echo "KUBECONFIG set to $KUBECONFIG"
 
-            echo "Waiting for K3s server to be ready..."
-            # Give k3s a moment to start its API server
-            sleep 10
-            timeout 300s bash -c '
-              for i in $(seq 1 30); do
-                # Use the explicit KUBECONFIG path for kubectl
-                if kubectl --kubeconfig=~/.kube/config get nodes -o wide | grep -q " Ready"; then
-                  echo "K3s node is ready."
-                  break
-                else
-                  echo "Attempt $i: K3s node not ready yet. Retrying in 10 seconds..."
-                  sleep 10
-                fi
-                if [ $i -eq 30 ]; then
-                  echo "Timeout: K3s node did not become ready after 5 minutes."
-                  exit 1
-                fi
-              done
-            '
-            kubectl get nodes # Verify node is visible
+            echo "Verifying KinD cluster nodes..."
+            kubectl get nodes
 
       - run:
           name: Run Mifos Gazelle Deployment Script
@@ -120,6 +75,9 @@ jobs:
             echo "Executing Mifos Gazelle's ./run.sh script..."
             # Ensure KUBECONFIG is set for this step
             export KUBECONFIG=~/.kube/config
+            # Mifos Gazelle's run.sh script might build Docker images.
+            # KinD can load images directly from the Docker daemon used by the host.
+            # If run.sh builds images, they will be available to KinD.
             ./run.sh
             echo "Mifos Gazelle deployment script execution completed."
 
@@ -163,9 +121,9 @@ jobs:
 
             while [ -z "$SERVICE_URL" ] && [ $ATTEMPTS -lt $MAX_ATTEMPTS ]; do
               echo "Attempt $((ATTEMPTS+1)): Getting service URL..."
-              # Get the Node IP
+              # For KinD, services are typically exposed via NodePort or LoadBalancer.
+              # We'll get the Node IP and the NodePort of the service.
               NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
-              # Get the NodePort for fineract-cn-api-gateway service
               SERVICE_NODEPORT=$(kubectl get service fineract-cn-api-gateway -n default -o jsonpath='{.spec.ports[?(@.name=="http")].nodePort}' 2>/dev/null)
 
               if [ -n "$NODE_IP" ] && [ -n "$SERVICE_NODEPORT" ]; then
