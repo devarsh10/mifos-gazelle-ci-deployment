@@ -7,7 +7,7 @@ executors:
   # Ubuntu 20.04 executor using CircleCI's base image
   ubuntu-2004:
     docker:
-      - image: cimg/base:20.04 # Specifies the Docker image for the execution environment
+      - image: cimg/base:stable # Changed from 20.04 to stable to resolve manifest unknown error
     resource_class: large # Use a larger resource class for Minikube/Docker operations
 
 # Define jobs: Individual tasks in the workflow
