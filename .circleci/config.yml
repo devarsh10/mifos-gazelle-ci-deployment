@@ -1,0 +1,157 @@
+# CircleCI 2.1 configuration for Mifos Gazelle deployment automation
+
+version: 2.1
+
+# Define executors: Environments where jobs will run
+executors:
+  # Ubuntu 20.04 executor using CircleCI's base image
+  ubuntu-2004:
+    docker:
+      - image: cimg/base:20.04 # Specifies the Docker image for the execution environment
+    resource_class: large # Use a larger resource class for Minikube/Docker operations
+
+# Define jobs: Individual tasks in the workflow
+jobs:
+  deploy-and-verify-mifos-gazelle:
+    executor: ubuntu-2004 # Use the defined Ubuntu 20.04 executor
+    steps:
+      - checkout # Step to check out the repository code into the working directory
+
+      - run:
+          name: Install Dependencies (Docker, Docker Compose, Kubectl, Minikube)
+          command: |
+            echo "Updating apt package list..."
+            sudo apt-get update -y
+
+            echo "Installing necessary packages for Docker..."
+            sudo apt-get install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common
+
+            echo "Adding Docker's official GPG key..."
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+
+            echo "Setting up the stable Docker repository..."
+            sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+
+            echo "Updating apt package list again after adding Docker repo..."
+            sudo apt-get update -y
+
+            echo "Installing Docker CE, Docker CE CLI, and Containerd..."
+            sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+
+            echo "Adding the current user to the docker group to run Docker commands without sudo."
+            # This change applies to subsequent shell sessions. For the current session,
+            # we'll use `newgrp docker` or ensure commands are run with `sudo`.
+            sudo usermod -aG docker $USER
+
+            echo "Installing Docker Compose (version 1.29.2)..."
+            sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            sudo chmod +x /usr/local/bin/docker-compose
+
+            echo "Verifying Docker and Docker Compose installation..."
+            docker --version
+            docker-compose --version
+
+            echo "Installing kubectl (Kubernetes command-line tool)..."
+            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+            kubectl version --client
+
+            echo "Installing Minikube (local Kubernetes cluster)..."
+            curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+            sudo install minikube-linux-amd64 /usr/local/bin/minikube
+            minikube version
+
+      - run:
+          name: Start Minikube Cluster
+          command: |
+            echo "Ensuring Docker daemon is running and accessible..."
+            # Start Docker service; '|| true' prevents script from failing if already running
+            sudo systemctl start docker || true
+            # Enable Docker service to start on boot; '|| true' prevents script from failing
+            sudo systemctl enable docker || true
+            # Apply docker group permissions to the current session
+            newgrp docker || true
+            docker ps # Verify docker is working
+
+            echo "Starting Minikube cluster with Docker driver..."
+            # Using --driver=docker as Docker is installed and preferred for CI environments
+            minikube start --driver=docker --memory=4096mb --cpus=2 # Allocate sufficient resources for Gazelle
+
+      - run:
+          name: Run Mifos Gazelle Deployment Script
+          command: |
+            echo "Executing Mifos Gazelle's ./run.sh script..."
+            # This script is expected to deploy Mifos Gazelle components to the Minikube cluster.
+            # Assuming the config.yml is at the root of the mifos-gazelle repository.
+            ./run.sh
+            echo "Mifos Gazelle deployment script execution completed."
+
+      - run:
+          name: Wait for Kubernetes Pods to be Ready
+          command: |
+            echo "Waiting for all Kubernetes pods in the 'default' namespace to reach 'Running' state..."
+            # Loop for up to 10 minutes (60 attempts * 10 seconds)
+            timeout 600s bash -c '
+              for i in $(seq 1 60); do
+                # Get names of pods that are NOT in "Running" state
+                UNREADY_PODS=$(kubectl get pods -n default -o json | jq -r ".items[] | select(.status.phase != \"Running\") | .metadata.name")
+                if [ -z "$UNREADY_PODS" ]; then
+                  echo "All pods in default namespace are running."
+                  break # Exit loop if all pods are running
+                else
+                  echo "Attempt $i: Still waiting for these pods to be Running: $UNREADY_PODS"
+                  kubectl get pods -n default # Show current pod status
+                  sleep 10 # Wait 10 seconds before next check
+                fi
+                if [ $i -eq 60 ]; then
+                  echo "Timeout: Not all pods in default namespace are running after 10 minutes."
+                  exit 1 # Exit with error if timeout reached
+                fi
+              done
+            '
+            echo "All required Kubernetes pods are running."
+
+      - run:
+          name: Verify Deployment with Curl
+          command: |
+            echo "Attempting to retrieve URL for 'fineract-cn-api-gateway' service..."
+            SERVICE_URL=""
+            ATTEMPTS=0
+            MAX_ATTEMPTS=30 # Max 5 minutes (30 * 10 seconds) to get service URL
+            while [ -z "$SERVICE_URL" ] && [ $ATTEMPTS -lt $MAX_ATTEMPTS ]; do
+              echo "Attempt $((ATTEMPTS+1)): Getting service URL..."
+              # Get the URL for the fineract-cn-api-gateway service in the default namespace
+              SERVICE_URL=$(minikube service fineract-cn-api-gateway --url -n default 2>/dev/null)
+              if [ -z "$SERVICE_URL" ]; then
+                echo "Service 'fineract-cn-api-gateway' not yet available or URL not retrieved. Retrying in 10 seconds..."
+                sleep 10
+              fi
+              ATTEMPTS=$((ATTEMPTS+1))
+            done
+
+            if [ -z "$SERVICE_URL" ]; then
+              echo "Error: Could not determine 'fineract-cn-api-gateway' service URL after multiple attempts."
+              exit 1 # Fail the job if URL cannot be obtained
+            fi
+
+            echo "Mifos Gazelle API Gateway URL: $SERVICE_URL"
+
+            echo "Performing health check curl to $SERVICE_URL/actuator/health..."
+            # Perform a curl request to the health endpoint and capture the HTTP status code
+            curl_status=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/actuator/health")
+            echo "Curl to $SERVICE_URL/actuator/health returned HTTP status: $curl_status"
+
+            # Check if the HTTP status code indicates success (2xx range)
+            if [[ "$curl_status" -ge 200 && "$curl_status" -lt 300 ]]; then
+              echo "Mifos Gazelle API Gateway is healthy (HTTP $curl_status). Deployment successful!"
+            else
+              echo "Error: Mifos Gazelle API Gateway did not return a healthy status (HTTP $curl_status). Deployment verification failed."
+              exit 1 # Fail the job if health check is unsuccessful
+            fi
+
+# Define workflows: Orchestrate jobs
+workflows:
+  version: 2
+  build-and-deploy-mifos-gazelle: # Name of the workflow
+    jobs:
+      - deploy-and-verify-mifos-gazelle # Run the defined job
