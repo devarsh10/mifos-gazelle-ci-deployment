@@ -16,6 +16,8 @@ jobs:
     executor: ubuntu-2004 # Use the defined Ubuntu 20.04 executor
     steps:
       - checkout # Step to check out the repository code into the working directory
+      - setup_remote_docker: # This step provisions a dedicated Docker environment
+          docker_layer_caching: true # Enable Docker layer caching for faster builds
 
       - run:
           name: Install Dependencies (Docker, Docker Compose, Kubectl, Minikube)
@@ -36,13 +38,9 @@ jobs:
             sudo apt-get update -y
 
             echo "Installing Docker CE, Docker CE CLI, and Containerd..."
-            sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+            # Docker is handled by setup_remote_docker, but we ensure the CLI is available
+            sudo apt-get install -y docker-ce-cli containerd.io
 
-            echo "Adding the current user to the docker group to run Docker commands without sudo."
-            # This change applies to subsequent shell sessions. For the current session,
-            # we'll use `newgrp docker` or ensure commands are run with `sudo`.
-            sudo usermod -aG docker circleci # Changed $USER to circleci
-            
             echo "Installing Docker Compose (version 1.29.2)..."
             sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
             sudo chmod +x /usr/local/bin/docker-compose
@@ -64,17 +62,8 @@ jobs:
       - run:
           name: Start Minikube Cluster
           command: |
-            echo "Ensuring Docker daemon is running and accessible..."
-            # Start Docker service; '|| true' prevents script from failing if already running
-            sudo systemctl start docker || true
-            # Enable Docker service to start on boot; '|| true' prevents script from failing
-            sudo systemctl enable docker || true
-            # Apply docker group permissions to the current session
-            newgrp docker || true
-            docker ps # Verify docker is working
-
             echo "Starting Minikube cluster with Docker driver..."
-            # Using --driver=docker as Docker is installed and preferred for CI environments
+            # Docker daemon should now be accessible via setup_remote_docker
             minikube start --driver=docker --memory=4096mb --cpus=2 # Allocate sufficient resources for Gazelle
 
       - run:
