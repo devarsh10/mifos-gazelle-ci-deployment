@@ -114,6 +114,15 @@ commands:
 
   deploy_mifos_gazelle:
     description: "Deploy Mifos Gazelle using run.sh script"
+    parameters:
+      apps:
+        type: string
+        default: "all"
+        description: "Apps to deploy (vnext|phee|mifosx|all)"
+      debug:
+        type: boolean
+        default: true
+        description: "Enable debug mode"
     steps:
       - run:
           name: Make run.sh executable and deploy
@@ -121,10 +130,33 @@ commands:
             # Make the run script executable
             chmod +x ./run.sh
             
-            # Deploy Mifos Gazelle with all components
-            # The script typically expects user parameter
-            sudo ./run.sh -u $USER
+            # Deploy Mifos Gazelle with specified components
+            echo "Deploying Mifos Gazelle with << parameters.apps >> components..."
+            echo "Debug mode: << parameters.debug >>"
+            
+            if [[ "<< parameters.debug >>" == "true" ]]; then
+              sudo ./run.sh -m deploy -u $USER -a << parameters.apps >> -d true
+            else
+              sudo ./run.sh -m deploy -u $USER -a << parameters.apps >>
+            fi
           no_output_timeout: 30m
+
+  cleanup_mifos_gazelle:
+    description: "Cleanup Mifos Gazelle deployment"
+    parameters:
+      cleanup_mode:
+        type: string
+        default: "cleanapps"
+        description: "Cleanup mode (cleanapps|cleanall)"
+    steps:
+      - run:
+          name: Cleanup Mifos Gazelle
+          command: |
+            # Cleanup based on specified mode
+            echo "Cleaning up Mifos Gazelle with mode: << parameters.cleanup_mode >>"
+            chmod +x ./run.sh
+            sudo ./run.sh -m << parameters.cleanup_mode >> -u $USER -d true
+          no_output_timeout: 15m
 
   verify_deployment:
     description: "Verify Mifos Gazelle deployment"
@@ -248,7 +280,9 @@ jobs:
             echo 'export PATH=$PATH:/usr/local/bin' >> $BASH_ENV
             source $BASH_ENV
       
-      - deploy_mifos_gazelle
+      - deploy_mifos_gazelle:
+          apps: "all"
+          debug: true
       
       - verify_deployment
       
@@ -282,9 +316,13 @@ jobs:
           name: Cleanup (optional)
           command: |
             echo "Deployment completed. Keeping cluster running for testing."
+            echo "To cleanup manually, you can run:"
+            echo "sudo ./run.sh -m cleanapps -u $USER -d true  # Clean apps only"
+            echo "sudo ./run.sh -m cleanall -u $USER -d true   # Clean everything"
+            
             # Uncomment below lines if you want to cleanup after testing
-            # kubectl delete --all pods --all-namespaces
-            # sudo systemctl stop k3s
+            # echo "Cleaning up apps..."
+            # sudo ./run.sh -m cleanapps -u $USER -d true
           when: always
 
 # Define the workflow
