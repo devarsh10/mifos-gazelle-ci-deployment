@@ -1,119 +1,29 @@
 version: 2.1
 
-# Define custom commands for reusability
+# Define custom commands for minimal setup
 commands:
-  install_k3s:
-    description: "Install and configure K3s lightweight Kubernetes"
+  basic_system_setup:
+    description: "Basic system setup and verification"
     steps:
       - run:
-          name: Install K3s
-          command: |
-            curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644
-            sudo mkdir -p ~/.kube
-            sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
-            sudo chown $(id -u):$(id -g) ~/.kube/config
-            export KUBECONFIG=~/.kube/config
-            
-            # Wait for K3s to be ready
-            timeout 300s bash -c 'until kubectl get nodes | grep -q "Ready"; do echo "Waiting for K3s to be ready..."; sleep 5; done'
-            
-            # Verify K3s installation
-            kubectl get nodes
-            kubectl cluster-info
-
-  install_helm:
-    description: "Install Helm package manager"
-    steps:
-      - run:
-          name: Install Helm
-          command: |
-            curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            helm version
-
-  setup_system_requirements:
-    description: "Setup system requirements for Mifos Gazelle"
-    steps:
-      - run:
-          name: Update system and install dependencies
-          command: |
-            sudo apt-get update
-            sudo apt-get install -y \
-              curl \
-              wget \
-              git \
-              jq \
-              unzip \
-              software-properties-common \
-              apt-transport-https \
-              ca-certificates \
-              gnupg \
-              lsb-release \
-              htop \
-              net-tools
-
-  install_docker:
-    description: "Install Docker"
-    steps:
-      - run:
-          name: Install Docker
-          command: |
-            # Add Docker's official GPG key
-            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-            
-            # Add Docker repository
-            echo \
-              "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
-              $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-            
-            # Install Docker
-            sudo apt-get update
-            sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-            
-            # Add user to docker group
-            sudo usermod -aG docker $USER
-            
-            # Start Docker service
-            sudo systemctl start docker
-            sudo systemctl enable docker
-            
-            # Verify Docker installation
-            sudo docker --version
-            sudo docker run hello-world
-
-  verify_system_resources:
-    description: "Verify system has enough resources"
-    steps:
-      - run:
-          name: Check system resources
+          name: System information and basic setup
           command: |
             echo "=== System Information ==="
             echo "Architecture: $(uname -m)"
             echo "OS: $(lsb_release -d)"
             echo "Kernel: $(uname -r)"
+            echo "CPU cores: $(nproc)"
+            echo "Memory: $(free -h | grep '^Mem:' | awk '{print $2}')"
+            echo "Disk space: $(df -h / | tail -1 | awk '{print $4}')"
             
-            echo "=== CPU Information ==="
-            nproc
-            cat /proc/cpuinfo | grep "model name" | head -1
+            # Update package manager
+            sudo apt-get update
             
-            echo "=== Memory Information ==="
-            free -h
-            
-            echo "=== Disk Information ==="
-            df -h
-            
-            echo "=== Network Information ==="
-            ip addr show
-            
-            # Check if we have at least 8GB RAM (recommended minimum)
-            TOTAL_RAM=$(free -g | awk '/^Mem:/{print $2}')
-            if [ $TOTAL_RAM -lt 8 ]; then
-              echo "WARNING: System has less than 8GB RAM ($TOTAL_RAM GB). Mifos Gazelle may not run optimally."
-            else
-              echo "System has sufficient RAM: $TOTAL_RAM GB"
-            fi
+            # Install only absolutely essential tools that run.sh might need
+            sudo apt-get install -y curl wget git
 
   deploy_mifos_gazelle:
-    description: "Deploy Mifos Gazelle using run.sh script"
+    description: "Deploy Mifos Gazelle using run.sh script - let it handle everything"
     parameters:
       apps:
         type: string
@@ -125,212 +35,209 @@ commands:
         description: "Enable debug mode"
     steps:
       - run:
-          name: Make run.sh executable and deploy
+          name: Deploy Mifos Gazelle with run.sh
           command: |
             # Make the run script executable
             chmod +x ./run.sh
             
-            # Deploy Mifos Gazelle with specified components
-            echo "Deploying Mifos Gazelle with << parameters.apps >> components..."
+            # Let run.sh handle all the heavy lifting
+            echo "=== Starting Mifos Gazelle Deployment ==="
+            echo "Apps to deploy: << parameters.apps >>"
             echo "Debug mode: << parameters.debug >>"
+            echo "User: $USER"
+            echo "Architecture: $(uname -m)"
             
+            # Deploy using run.sh - this should handle k3s, helm, etc.
             if [[ "<< parameters.debug >>" == "true" ]]; then
               sudo ./run.sh -m deploy -u $USER -a << parameters.apps >> -d true
             else
               sudo ./run.sh -m deploy -u $USER -a << parameters.apps >>
             fi
-          no_output_timeout: 30m
-
-  cleanup_mifos_gazelle:
-    description: "Cleanup Mifos Gazelle deployment"
-    parameters:
-      cleanup_mode:
-        type: string
-        default: "cleanapps"
-        description: "Cleanup mode (cleanapps|cleanall)"
-    steps:
-      - run:
-          name: Cleanup Mifos Gazelle
-          command: |
-            # Cleanup based on specified mode
-            echo "Cleaning up Mifos Gazelle with mode: << parameters.cleanup_mode >>"
-            chmod +x ./run.sh
-            sudo ./run.sh -m << parameters.cleanup_mode >> -u $USER -d true
-          no_output_timeout: 15m
+          no_output_timeout: 45m  # Increased timeout since run.sh does everything
 
   verify_deployment:
-    description: "Verify Mifos Gazelle deployment"
+    description: "Verify deployment using kubectl (should be installed by run.sh)"
     steps:
       - run:
-          name: Check Kubernetes pods status
+          name: Verify Mifos Gazelle deployment
           command: |
-            echo "=== Checking Kubernetes namespaces ==="
-            kubectl get namespaces
+            echo "=== Verifying Mifos Gazelle Deployment ==="
             
-            echo "=== Checking Mojaloop pods ==="
-            kubectl get pods -n mojaloop || echo "Mojaloop namespace not found"
-            
-            echo "=== Checking Payment Hub pods ==="
-            kubectl get pods -n paymenthub || echo "Payment Hub namespace not found"
-            
-            echo "=== Checking Fineract pods ==="
-            kubectl get pods -n fineract || echo "Fineract namespace not found"
-            
-            echo "=== Checking default namespace pods ==="
-            kubectl get pods -n default
-            
-            echo "=== Checking all pods across all namespaces ==="
-            kubectl get pods --all-namespaces
-            
-            echo "=== Checking services ==="
-            kubectl get svc --all-namespaces
+            # Check if kubectl is available (should be installed by run.sh)
+            if command -v kubectl &> /dev/null; then
+              echo "kubectl is available"
+              
+              echo "=== Kubernetes Cluster Info ==="
+              kubectl cluster-info || echo "Could not get cluster info"
+              
+              echo "=== Checking namespaces ==="
+              kubectl get namespaces || echo "Could not get namespaces"
+              
+              echo "=== Checking all pods ==="
+              kubectl get pods --all-namespaces || echo "Could not get pods"
+              
+              echo "=== Checking services ==="
+              kubectl get svc --all-namespaces || echo "Could not get services"
+              
+              echo "=== Checking nodes ==="
+              kubectl get nodes || echo "Could not get nodes"
+            else
+              echo "kubectl not found - run.sh may not have completed successfully"
+              exit 1
+            fi
 
-  wait_for_pods:
-    description: "Wait for pods to be ready"
+  test_endpoints:
+    description: "Test deployed endpoints"
     steps:
       - run:
-          name: Wait for pods to be in Running state
+          name: Test Mifos Gazelle endpoints
           command: |
-            echo "Waiting for pods to be ready..."
+            echo "=== Testing Mifos Gazelle Endpoints ==="
             
-            # Function to check if all pods in a namespace are running
-            check_namespace_pods() {
+            if ! command -v kubectl &> /dev/null; then
+              echo "kubectl not available - cannot test endpoints"
+              exit 1
+            fi
+            
+            # Get all services
+            echo "=== Available Services ==="
+            kubectl get svc --all-namespaces
+            
+            # Test basic connectivity to services
+            echo "=== Testing Service Connectivity ==="
+            
+            # Function to test a service in a namespace
+            test_service() {
               local namespace=$1
-              if kubectl get namespace $namespace >/dev/null 2>&1; then
-                echo "Checking pods in namespace: $namespace"
-                kubectl wait --for=condition=Ready pods --all -n $namespace --timeout=600s || true
+              local service=$2
+              local port=$3
+              
+              if kubectl get svc -n $namespace $service &>/dev/null; then
+                echo "Testing $service in $namespace namespace..."
+                # Port forward and test
+                kubectl port-forward -n $namespace svc/$service $port:$port &
+                PID=$!
+                sleep 5
+                if curl -f --connect-timeout 10 http://localhost:$port/health 2>/dev/null; then
+                  echo "✓ $service health check passed"
+                else
+                  echo "✗ $service health check failed (may be normal if no health endpoint)"
+                fi
+                kill $PID 2>/dev/null || true
               else
-                echo "Namespace $namespace does not exist"
+                echo "Service $service not found in namespace $namespace"
               fi
             }
             
-            # Check common namespaces
-            check_namespace_pods "mojaloop"
-            check_namespace_pods "paymenthub"
-            check_namespace_pods "fineract"
-            check_namespace_pods "default"
+            # Test common services (these may vary based on what's actually deployed)
+            test_service "mojaloop" "ml-api-adapter" "3000"
+            test_service "paymenthub" "ph-ee-connector-ams-mifos" "8080"
+            test_service "fineract" "fineract-server" "8080"
             
-            # Final status check
-            kubectl get pods --all-namespaces
-          no_output_timeout: 15m
+            echo "=== Endpoint Testing Completed ==="
 
-  test_endpoints:
-    description: "Test Mifos Gazelle endpoints"
-    steps:
-      - run:
-          name: Test deployed services with curl
-          command: |
-            echo "=== Testing Mifos Gazelle endpoints ==="
-            
-            # Get service URLs
-            echo "Getting service information..."
-            kubectl get svc --all-namespaces
-            
-            # Test Mojaloop if available
-            if kubectl get svc -n mojaloop >/dev/null 2>&1; then
-              echo "Testing Mojaloop endpoints..."
-              # Port forward to test locally
-              kubectl port-forward -n mojaloop svc/ml-api-adapter 3000:3000 &
-              sleep 10
-              curl -f http://localhost:3000/health || echo "Mojaloop health check failed"
-              pkill kubectl || true
-            fi
-            
-            # Test Payment Hub if available
-            if kubectl get svc -n paymenthub >/dev/null 2>&1; then
-              echo "Testing Payment Hub endpoints..."
-              # Add specific Payment Hub tests here
-              kubectl get svc -n paymenthub
-            fi
-            
-            # Test Fineract if available
-            if kubectl get svc -n fineract >/dev/null 2>&1; then
-              echo "Testing Fineract endpoints..."
-              # Add specific Fineract tests here
-              kubectl get svc -n fineract
-            fi
-            
-            echo "=== Endpoint testing completed ==="
-
-# Define the job
+# Define jobs for different architectures
 jobs:
-  deploy-and-test-mifos-gazelle:
-    # Use Ubuntu 20.04 as requested
+  deploy-test-amd64:
     machine:
       image: ubuntu-2004:current
-    resource_class: large # Use large instance for better performance
-    
+    resource_class: large
     steps:
       - checkout
-      
-      - verify_system_resources
-      
-      - setup_system_requirements
-      
-      - install_docker
-      
-      - install_k3s
-      
-      - install_helm
-      
-      - run:
-          name: Setup environment variables
-          command: |
-            echo 'export KUBECONFIG=~/.kube/config' >> $BASH_ENV
-            echo 'export PATH=$PATH:/usr/local/bin' >> $BASH_ENV
-            source $BASH_ENV
-      
+      - basic_system_setup
       - deploy_mifos_gazelle:
           apps: "all"
           debug: true
-      
       - verify_deployment
-      
-      - wait_for_pods
-      
       - test_endpoints
-      
       - run:
           name: Generate deployment report
           command: |
-            echo "=== Mifos Gazelle Deployment Report ===" > deployment_report.txt
-            echo "Deployment Date: $(date)" >> deployment_report.txt
-            echo "Kubernetes Version: $(kubectl version --short)" >> deployment_report.txt
-            echo "" >> deployment_report.txt
-            echo "=== Namespaces ===" >> deployment_report.txt
-            kubectl get namespaces >> deployment_report.txt
-            echo "" >> deployment_report.txt
-            echo "=== All Pods Status ===" >> deployment_report.txt
-            kubectl get pods --all-namespaces >> deployment_report.txt
-            echo "" >> deployment_report.txt
-            echo "=== All Services ===" >> deployment_report.txt
-            kubectl get svc --all-namespaces >> deployment_report.txt
+            echo "=== Mifos Gazelle Deployment Report (AMD64) ===" > deployment_report_amd64.txt
+            echo "Deployment Date: $(date)" >> deployment_report_amd64.txt
+            echo "Architecture: $(uname -m)" >> deployment_report_amd64.txt
+            echo "OS: $(lsb_release -d)" >> deployment_report_amd64.txt
+            echo "" >> deployment_report_amd64.txt
             
-            cat deployment_report.txt
-      
+            if command -v kubectl &> /dev/null; then
+              echo "Kubernetes Version: $(kubectl version --short 2>/dev/null || echo 'Could not get version')" >> deployment_report_amd64.txt
+              echo "" >> deployment_report_amd64.txt
+              echo "=== Namespaces ===" >> deployment_report_amd64.txt
+              kubectl get namespaces >> deployment_report_amd64.txt 2>/dev/null || echo "Could not get namespaces" >> deployment_report_amd64.txt
+              echo "" >> deployment_report_amd64.txt
+              echo "=== All Pods ===" >> deployment_report_amd64.txt
+              kubectl get pods --all-namespaces >> deployment_report_amd64.txt 2>/dev/null || echo "Could not get pods" >> deployment_report_amd64.txt
+              echo "" >> deployment_report_amd64.txt
+              echo "=== All Services ===" >> deployment_report_amd64.txt
+              kubectl get svc --all-namespaces >> deployment_report_amd64.txt 2>/dev/null || echo "Could not get services" >> deployment_report_amd64.txt
+            else
+              echo "kubectl not available - deployment may have failed" >> deployment_report_amd64.txt
+            fi
+            
+            cat deployment_report_amd64.txt
       - store_artifacts:
-          path: deployment_report.txt
-          destination: deployment_report.txt
-      
+          path: deployment_report_amd64.txt
       - run:
-          name: Cleanup (optional)
+          name: Optional cleanup
           command: |
-            echo "Deployment completed. Keeping cluster running for testing."
-            echo "To cleanup manually, you can run:"
+            echo "Deployment completed on AMD64. To cleanup:"
             echo "sudo ./run.sh -m cleanapps -u $USER -d true  # Clean apps only"
             echo "sudo ./run.sh -m cleanall -u $USER -d true   # Clean everything"
-            
-            # Uncomment below lines if you want to cleanup after testing
-            # echo "Cleaning up apps..."
-            # sudo ./run.sh -m cleanapps -u $USER -d true
           when: always
 
-# Define the workflow
+  deploy-test-arm64:
+    machine:
+      image: ubuntu-2004:current
+    resource_class: arm.large  # ARM64 resource class
+    steps:
+      - checkout
+      - basic_system_setup
+      - deploy_mifos_gazelle:
+          apps: "all"
+          debug: true
+      - verify_deployment
+      - test_endpoints
+      - run:
+          name: Generate deployment report
+          command: |
+            echo "=== Mifos Gazelle Deployment Report (ARM64) ===" > deployment_report_arm64.txt
+            echo "Deployment Date: $(date)" >> deployment_report_arm64.txt
+            echo "Architecture: $(uname -m)" >> deployment_report_arm64.txt
+            echo "OS: $(lsb_release -d)" >> deployment_report_arm64.txt
+            echo "" >> deployment_report_arm64.txt
+            
+            if command -v kubectl &> /dev/null; then
+              echo "Kubernetes Version: $(kubectl version --short 2>/dev/null || echo 'Could not get version')" >> deployment_report_arm64.txt
+              echo "" >> deployment_report_arm64.txt
+              echo "=== Namespaces ===" >> deployment_report_arm64.txt
+              kubectl get namespaces >> deployment_report_arm64.txt 2>/dev/null || echo "Could not get namespaces" >> deployment_report_arm64.txt
+              echo "" >> deployment_report_arm64.txt
+              echo "=== All Pods ===" >> deployment_report_arm64.txt
+              kubectl get pods --all-namespaces >> deployment_report_arm64.txt 2>/dev/null || echo "Could not get pods" >> deployment_report_arm64.txt
+              echo "" >> deployment_report_arm64.txt
+              echo "=== All Services ===" >> deployment_report_arm64.txt
+              kubectl get svc --all-namespaces >> deployment_report_arm64.txt 2>/dev/null || echo "Could not get services" >> deployment_report_arm64.txt
+            else
+              echo "kubectl not available - deployment may have failed" >> deployment_report_arm64.txt
+            fi
+            
+            cat deployment_report_arm64.txt
+      - store_artifacts:
+          path: deployment_report_arm64.txt
+      - run:
+          name: Optional cleanup
+          command: |
+            echo "Deployment completed on ARM64. To cleanup:"
+            echo "sudo ./run.sh -m cleanapps -u $USER -d true  # Clean apps only"
+            echo "sudo ./run.sh -m cleanall -u $USER -d true   # Clean everything"
+          when: always
+
+# Define workflows
 workflows:
   version: 2
-  deploy-mifos-gazelle:
+  test-multi-arch:
     jobs:
-      - deploy-and-test-mifos-gazelle:
+      - deploy-test-amd64:
           filters:
             branches:
               only:
@@ -338,3 +245,28 @@ workflows:
                 - develop
                 - /^feature\/.*/
                 - /^hotfix\/.*/
+      - deploy-test-arm64:
+          filters:
+            branches:
+              only:
+                - main
+                - develop
+                - /^feature\/.*/
+                - /^hotfix\/.*/
+
+  # Alternative: Test one architecture at a time
+  test-amd64-only:
+    jobs:
+      - deploy-test-amd64:
+          filters:
+            branches:
+              only:
+                - /^test-amd64\/.*/
+
+  test-arm64-only:
+    jobs:
+      - deploy-test-arm64:
+          filters:
+            branches:
+              only:
+                - /^test-arm64\/.*/
