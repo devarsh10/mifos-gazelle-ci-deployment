@@ -41,8 +41,8 @@ jobs:
             echo "Adding the current user to the docker group to run Docker commands without sudo."
             # This change applies to subsequent shell sessions. For the current session,
             # we'll use `newgrp docker` or ensure commands are run with `sudo`.
-            sudo usermod -aG docker $USER
-
+            sudo usermod -aG docker circleci # Changed $USER to circleci
+            
             echo "Installing Docker Compose (version 1.29.2)..."
             sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
             sudo chmod +x /usr/local/bin/docker-compose
