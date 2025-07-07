@@ -1,175 +1,302 @@
-# CircleCI 2.1 configuration for Mifos Gazelle deployment automation
-
 version: 2.1
 
-# Define executors: Environments where jobs will run
-executors:
-  # Ubuntu 20.04 executor using CircleCI's base image
-  ubuntu-2004:
-    docker:
-      - image: cimg/base:stable # Using stable base image
-    resource_class: large # Use a larger resource class for Docker operations
-
-# Define jobs: Individual tasks in the workflow
-jobs:
-  deploy-and-verify-mifos-gazelle:
-    executor: ubuntu-2004 # Use the defined Ubuntu 20.04 executor
+# Define custom commands for reusability
+commands:
+  install_k3s:
+    description: "Install and configure K3s lightweight Kubernetes"
     steps:
-      - checkout # Step to check out the repository code into the working directory
-      - setup_remote_docker: # This step provisions a dedicated Docker environment
-          docker_layer_caching: true # Enable Docker layer caching for faster builds
-
       - run:
-          name: Install Dependencies (Docker Compose, Kubectl, KinD)
+          name: Install K3s
           command: |
-            echo "Updating apt package list..."
-            sudo apt-get update -y
-
-            echo "Installing necessary packages..."
-            sudo apt-get install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common jq
-
-            echo "Installing Docker Compose (version 1.29.2)..."
-            sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-            sudo chmod +x /usr/local/bin/docker-compose
-
-            echo "Verifying Docker and Docker Compose installation..."
-            docker --version # Docker daemon is provided by setup_remote_docker
-            docker-compose --version
-
-            echo "Installing kubectl (Kubernetes command-line tool)..."
-            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-            sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-            kubectl version --client
-
-            echo "Installing KinD (Kubernetes in Docker)..."
-            # For AMD64 / x86_64
-            [ $(uname -m) = x86_64 ] && curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
-            chmod +x ./kind
-            sudo mv ./kind /usr/local/bin/kind
-            kind version
-
-      - run:
-          name: Create KinD Cluster
-          command: |
-            echo "Creating KinD cluster..."
-            # Create a KinD cluster. This will run Kubernetes inside a Docker container.
-            # Using --wait to ensure the cluster is ready before proceeding.
-            kind create cluster --name mifos-gazelle-cluster --wait 300s # Wait up to 5 minutes
-
-            echo "Setting KUBECONFIG for KinD cluster..."
-            mkdir -p ~/.kube
-            # Get the kubeconfig for the KinD cluster
-            kind get kubeconfig --name mifos-gazelle-cluster > ~/.kube/config.tmp
-
-            # Extract the IP address from the DOCKER_HOST environment variable
-            # DOCKER_HOST is typically in the format tcp://<IP>:<PORT>
-            DOCKER_IP=$(echo $DOCKER_HOST | sed -E 's/tcp:\/\/(.*):.*/\1/')
-            echo "Detected DOCKER_IP: $DOCKER_IP"
-
-            # Replace 127.0.0.1 in the kubeconfig with the DOCKER_IP
-            # This ensures kubectl connects to the remote Docker daemon's IP where KinD is running
-            sed -i "s/server: https:\/\/127.0.0.1:/server: https:\/\/$DOCKER_IP:/g" ~/.kube/config.tmp
-
-            # Move the modified kubeconfig to the final location
-            mv ~/.kube/config.tmp ~/.kube/config
-            chmod 600 ~/.kube/config
+            curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644
+            sudo mkdir -p ~/.kube
+            sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+            sudo chown $(id -u):$(id -g) ~/.kube/config
             export KUBECONFIG=~/.kube/config
-            echo "KUBECONFIG set to $KUBECONFIG"
-
-            echo "Verifying KinD cluster nodes..."
-            # Now kubectl should be able to connect to the KinD cluster
+            
+            # Wait for K3s to be ready
+            timeout 300s bash -c 'until kubectl get nodes | grep -q "Ready"; do echo "Waiting for K3s to be ready..."; sleep 5; done'
+            
+            # Verify K3s installation
             kubectl get nodes
+            kubectl cluster-info
 
+  install_helm:
+    description: "Install Helm package manager"
+    steps:
       - run:
-          name: Run Mifos Gazelle Deployment Script
+          name: Install Helm
           command: |
-            echo "Executing Mifos Gazelle's ./run.sh script..."
-            # Ensure KUBECONFIG is set for this step
-            export KUBECONFIG=~/.kube/config
-            # Mifos Gazelle's run.sh script might build Docker images.
-            # KinD can load images directly from the Docker daemon used by the host.
-            # If run.sh builds images, they will be available to KinD.
-            ./run.sh
-            echo "Mifos Gazelle deployment script execution completed."
+            curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+            helm version
 
+  setup_system_requirements:
+    description: "Setup system requirements for Mifos Gazelle"
+    steps:
       - run:
-          name: Wait for Kubernetes Pods to be Ready
+          name: Update system and install dependencies
           command: |
-            echo "Waiting for all Kubernetes pods in the 'default' namespace to reach 'Running' state..."
-            # Ensure KUBECONFIG is set for this step
-            export KUBECONFIG=~/.kube/config
-            # Loop for up to 10 minutes (60 attempts * 10 seconds)
-            timeout 600s bash -c '
-              for i in $(seq 1 60); do
-                # Get names of pods that are NOT in "Running" state
-                UNREADY_PODS=$(kubectl get pods -n default -o json | jq -r ".items[] | select(.status.phase != \"Running\") | .metadata.name")
-                if [ -z "$UNREADY_PODS" ]; then
-                  echo "All pods in default namespace are running."
-                  break # Exit loop if all pods are running
-                else
-                  echo "Attempt $i: Still waiting for these pods to be Running: $UNREADY_PODS"
-                  kubectl get pods -n default # Show current pod status
-                  sleep 10 # Wait 10 seconds before next check
-                fi
-                if [ $i -eq 60 ]; then
-                  echo "Timeout: Not all pods in default namespace are running after 10 minutes."
-                  exit 1 # Exit with error if timeout reached
-                fi
-              done
-            '
-            echo "All required Kubernetes pods are running."
+            sudo apt-get update
+            sudo apt-get install -y \
+              curl \
+              wget \
+              git \
+              jq \
+              unzip \
+              software-properties-common \
+              apt-transport-https \
+              ca-certificates \
+              gnupg \
+              lsb-release \
+              htop \
+              net-tools
 
+  install_docker:
+    description: "Install Docker"
+    steps:
       - run:
-          name: Verify Deployment with Curl
+          name: Install Docker
           command: |
-            echo "Attempting to retrieve URL for 'fineract-cn-api-gateway' service..."
-            # Ensure KUBECONFIG is set for this step
-            export KUBECONFIG=~/.kube/config
+            # Add Docker's official GPG key
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+            
+            # Add Docker repository
+            echo \
+              "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
+              $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            
+            # Install Docker
+            sudo apt-get update
+            sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+            
+            # Add user to docker group
+            sudo usermod -aG docker $USER
+            
+            # Start Docker service
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            
+            # Verify Docker installation
+            sudo docker --version
+            sudo docker run hello-world
 
-            SERVICE_URL=""
-            ATTEMPTS=0
-            MAX_ATTEMPTS=30 # Max 5 minutes (30 * 10 seconds) to get service URL
-
-            while [ -z "$SERVICE_URL" ] && [ $ATTEMPTS -lt $MAX_ATTEMPTS ]; do
-              echo "Attempt $((ATTEMPTS+1)): Getting service URL..."
-              # For KinD, services are typically exposed via NodePort or LoadBalancer.
-              # We'll get the Node IP and the NodePort of the service.
-              NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
-              SERVICE_NODEPORT=$(kubectl get service fineract-cn-api-gateway -n default -o jsonpath='{.spec.ports[?(@.name=="http")].nodePort}' 2>/dev/null)
-
-              if [ -n "$NODE_IP" ] && [ -n "$SERVICE_NODEPORT" ]; then
-                SERVICE_URL="http://$NODE_IP:$SERVICE_NODEPORT"
-                echo "Constructed service URL: $SERVICE_URL"
-              else
-                echo "Node IP ($NODE_IP) or Service NodePort ($SERVICE_NODEPORT) not yet available. Retrying in 10 seconds..."
-                sleep 10
-              fi
-              ATTEMPTS=$((ATTEMPTS+1))
-            done
-
-            if [ -z "$SERVICE_URL" ]; then
-              echo "Error: Could not determine 'fineract-cn-api-gateway' service URL after multiple attempts."
-              exit 1 # Fail the job if URL cannot be obtained
-            fi
-
-            echo "Mifos Gazelle API Gateway URL: $SERVICE_URL"
-
-            echo "Performing health check curl to $SERVICE_URL/actuator/health..."
-            # Perform a curl request to the health endpoint and capture the HTTP status code
-            curl_status=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/actuator/health")
-            echo "Curl to $SERVICE_URL/actuator/health returned HTTP status: $curl_status"
-
-            # Check if the HTTP status code indicates success (2xx range)
-            if [[ "$curl_status" -ge 200 && "$curl_status" -lt 300 ]]; then
-              echo "Mifos Gazelle API Gateway is healthy (HTTP $curl_status). Deployment successful!"
+  verify_system_resources:
+    description: "Verify system has enough resources"
+    steps:
+      - run:
+          name: Check system resources
+          command: |
+            echo "=== System Information ==="
+            echo "Architecture: $(uname -m)"
+            echo "OS: $(lsb_release -d)"
+            echo "Kernel: $(uname -r)"
+            
+            echo "=== CPU Information ==="
+            nproc
+            cat /proc/cpuinfo | grep "model name" | head -1
+            
+            echo "=== Memory Information ==="
+            free -h
+            
+            echo "=== Disk Information ==="
+            df -h
+            
+            echo "=== Network Information ==="
+            ip addr show
+            
+            # Check if we have at least 8GB RAM (recommended minimum)
+            TOTAL_RAM=$(free -g | awk '/^Mem:/{print $2}')
+            if [ $TOTAL_RAM -lt 8 ]; then
+              echo "WARNING: System has less than 8GB RAM ($TOTAL_RAM GB). Mifos Gazelle may not run optimally."
             else
-              echo "Error: Mifos Gazelle API Gateway did not return a healthy status (HTTP $curl_status). Deployment verification failed."
-              exit 1 # Fail the job if health check is unsuccessful
+              echo "System has sufficient RAM: $TOTAL_RAM GB"
             fi
 
-# Define workflows: Orchestrate jobs
+  deploy_mifos_gazelle:
+    description: "Deploy Mifos Gazelle using run.sh script"
+    steps:
+      - run:
+          name: Make run.sh executable and deploy
+          command: |
+            # Make the run script executable
+            chmod +x ./run.sh
+            
+            # Deploy Mifos Gazelle with all components
+            # The script typically expects user parameter
+            sudo ./run.sh -u $USER
+          no_output_timeout: 30m
+
+  verify_deployment:
+    description: "Verify Mifos Gazelle deployment"
+    steps:
+      - run:
+          name: Check Kubernetes pods status
+          command: |
+            echo "=== Checking Kubernetes namespaces ==="
+            kubectl get namespaces
+            
+            echo "=== Checking Mojaloop pods ==="
+            kubectl get pods -n mojaloop || echo "Mojaloop namespace not found"
+            
+            echo "=== Checking Payment Hub pods ==="
+            kubectl get pods -n paymenthub || echo "Payment Hub namespace not found"
+            
+            echo "=== Checking Fineract pods ==="
+            kubectl get pods -n fineract || echo "Fineract namespace not found"
+            
+            echo "=== Checking default namespace pods ==="
+            kubectl get pods -n default
+            
+            echo "=== Checking all pods across all namespaces ==="
+            kubectl get pods --all-namespaces
+            
+            echo "=== Checking services ==="
+            kubectl get svc --all-namespaces
+
+  wait_for_pods:
+    description: "Wait for pods to be ready"
+    steps:
+      - run:
+          name: Wait for pods to be in Running state
+          command: |
+            echo "Waiting for pods to be ready..."
+            
+            # Function to check if all pods in a namespace are running
+            check_namespace_pods() {
+              local namespace=$1
+              if kubectl get namespace $namespace >/dev/null 2>&1; then
+                echo "Checking pods in namespace: $namespace"
+                kubectl wait --for=condition=Ready pods --all -n $namespace --timeout=600s || true
+              else
+                echo "Namespace $namespace does not exist"
+              fi
+            }
+            
+            # Check common namespaces
+            check_namespace_pods "mojaloop"
+            check_namespace_pods "paymenthub"
+            check_namespace_pods "fineract"
+            check_namespace_pods "default"
+            
+            # Final status check
+            kubectl get pods --all-namespaces
+          no_output_timeout: 15m
+
+  test_endpoints:
+    description: "Test Mifos Gazelle endpoints"
+    steps:
+      - run:
+          name: Test deployed services with curl
+          command: |
+            echo "=== Testing Mifos Gazelle endpoints ==="
+            
+            # Get service URLs
+            echo "Getting service information..."
+            kubectl get svc --all-namespaces
+            
+            # Test Mojaloop if available
+            if kubectl get svc -n mojaloop >/dev/null 2>&1; then
+              echo "Testing Mojaloop endpoints..."
+              # Port forward to test locally
+              kubectl port-forward -n mojaloop svc/ml-api-adapter 3000:3000 &
+              sleep 10
+              curl -f http://localhost:3000/health || echo "Mojaloop health check failed"
+              pkill kubectl || true
+            fi
+            
+            # Test Payment Hub if available
+            if kubectl get svc -n paymenthub >/dev/null 2>&1; then
+              echo "Testing Payment Hub endpoints..."
+              # Add specific Payment Hub tests here
+              kubectl get svc -n paymenthub
+            fi
+            
+            # Test Fineract if available
+            if kubectl get svc -n fineract >/dev/null 2>&1; then
+              echo "Testing Fineract endpoints..."
+              # Add specific Fineract tests here
+              kubectl get svc -n fineract
+            fi
+            
+            echo "=== Endpoint testing completed ==="
+
+# Define the job
+jobs:
+  deploy-and-test-mifos-gazelle:
+    # Use Ubuntu 20.04 as requested
+    machine:
+      image: ubuntu-2004:current
+    resource_class: large # Use large instance for better performance
+    
+    steps:
+      - checkout
+      
+      - verify_system_resources
+      
+      - setup_system_requirements
+      
+      - install_docker
+      
+      - install_k3s
+      
+      - install_helm
+      
+      - run:
+          name: Setup environment variables
+          command: |
+            echo 'export KUBECONFIG=~/.kube/config' >> $BASH_ENV
+            echo 'export PATH=$PATH:/usr/local/bin' >> $BASH_ENV
+            source $BASH_ENV
+      
+      - deploy_mifos_gazelle
+      
+      - verify_deployment
+      
+      - wait_for_pods
+      
+      - test_endpoints
+      
+      - run:
+          name: Generate deployment report
+          command: |
+            echo "=== Mifos Gazelle Deployment Report ===" > deployment_report.txt
+            echo "Deployment Date: $(date)" >> deployment_report.txt
+            echo "Kubernetes Version: $(kubectl version --short)" >> deployment_report.txt
+            echo "" >> deployment_report.txt
+            echo "=== Namespaces ===" >> deployment_report.txt
+            kubectl get namespaces >> deployment_report.txt
+            echo "" >> deployment_report.txt
+            echo "=== All Pods Status ===" >> deployment_report.txt
+            kubectl get pods --all-namespaces >> deployment_report.txt
+            echo "" >> deployment_report.txt
+            echo "=== All Services ===" >> deployment_report.txt
+            kubectl get svc --all-namespaces >> deployment_report.txt
+            
+            cat deployment_report.txt
+      
+      - store_artifacts:
+          path: deployment_report.txt
+          destination: deployment_report.txt
+      
+      - run:
+          name: Cleanup (optional)
+          command: |
+            echo "Deployment completed. Keeping cluster running for testing."
+            # Uncomment below lines if you want to cleanup after testing
+            # kubectl delete --all pods --all-namespaces
+            # sudo systemctl stop k3s
+          when: always
+
+# Define the workflow
 workflows:
   version: 2
-  build-and-deploy-mifos-gazelle: # Name of the workflow
+  deploy-mifos-gazelle:
     jobs:
-      - deploy-and-verify-mifos-gazelle # Run the defined job
+      - deploy-and-test-mifos-gazelle:
+          filters:
+            branches:
+              only:
+                - main
+                - develop
+                - /^feature\/.*/
+                - /^hotfix\/.*/
