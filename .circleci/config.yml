@@ -51,26 +51,37 @@ jobs:
 
             echo "Installing K3s (lightweight Kubernetes cluster)..."
             # Install k3s, make kubeconfig readable by non-root, and prevent it from starting as a service immediately
-            # We'll start it manually in the next step
+            # We'll start it manually in the next step.
+            # Set K3S_KUBECONFIG_MODE to ensure the kubeconfig file is readable.
+            # The --docker flag will be used when starting the server, so no need for snapshotter here.
             curl -sfL https://get.k3s.io | INSTALL_K3S_SKIP_ENABLE=true K3S_KUBECONFIG_MODE="644" sh -
 
             echo "Installing kubectl (Kubernetes command-line tool)..."
             # K3s installs its own kubectl, but we ensure the standard one is available and linked
             # The K3s install script should have already symlinked kubectl to /usr/local/bin/kubectl
-            # and set KUBECONFIG to /etc/rancher/k3s/k3s.yaml
             kubectl version --client
 
       - run:
           name: Start K3s Cluster
           command: |
-            echo "Starting K3s server..."
-            # Start k3s server in the background
-            sudo k3s server &
-            # Wait for k3s to be ready
+            echo "Setting up KUBECONFIG..."
+            mkdir -p ~/.kube
+            sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+            sudo chmod 600 ~/.kube/config
+            export KUBECONFIG=~/.kube/config
+            echo "KUBECONFIG set to $KUBECONFIG"
+
+            echo "Starting K3s server with Docker runtime..."
+            # Start k3s server in the background, using the Docker daemon provided by setup_remote_docker
+            sudo k3s server --docker &
+
             echo "Waiting for K3s server to be ready..."
+            # Give k3s a moment to start its API server
+            sleep 10
             timeout 300s bash -c '
               for i in $(seq 1 30); do
-                if sudo kubectl get nodes -o wide | grep -q " Ready"; then
+                # Use the explicit KUBECONFIG path for kubectl
+                if kubectl --kubeconfig=~/.kube/config get nodes -o wide | grep -q " Ready"; then
                   echo "K3s node is ready."
                   break
                 else
@@ -83,17 +94,14 @@ jobs:
                 fi
               done
             '
-            # Set KUBECONFIG environment variable for subsequent kubectl commands
-            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-            echo "KUBECONFIG set to $KUBECONFIG"
             kubectl get nodes # Verify node is visible
 
       - run:
           name: Run Mifos Gazelle Deployment Script
           command: |
             echo "Executing Mifos Gazelle's ./run.sh script..."
-            # Ensure KUBECONFIG is set for this step as well
-            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            # Ensure KUBECONFIG is set for this step
+            export KUBECONFIG=~/.kube/config
             ./run.sh
             echo "Mifos Gazelle deployment script execution completed."
 
@@ -102,7 +110,7 @@ jobs:
           command: |
             echo "Waiting for all Kubernetes pods in the 'default' namespace to reach 'Running' state..."
             # Ensure KUBECONFIG is set for this step
-            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            export KUBECONFIG=~/.kube/config
             # Loop for up to 10 minutes (60 attempts * 10 seconds)
             timeout 600s bash -c '
               for i in $(seq 1 60); do
@@ -129,7 +137,7 @@ jobs:
           command: |
             echo "Attempting to retrieve URL for 'fineract-cn-api-gateway' service..."
             # Ensure KUBECONFIG is set for this step
-            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            export KUBECONFIG=~/.kube/config
 
             SERVICE_URL=""
             ATTEMPTS=0
@@ -138,9 +146,9 @@ jobs:
             while [ -z "$SERVICE_URL" ] && [ $ATTEMPTS -lt $MAX_ATTEMPTS ]; do
               echo "Attempt $((ATTEMPTS+1)): Getting service URL..."
               # Get the Node IP
-              NODE_IP=$(sudo kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+              NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
               # Get the NodePort for fineract-cn-api-gateway service
-              SERVICE_NODEPORT=$(sudo kubectl get service fineract-cn-api-gateway -n default -o jsonpath='{.spec.ports[?(@.name=="http")].nodePort}' 2>/dev/null)
+              SERVICE_NODEPORT=$(kubectl get service fineract-cn-api-gateway -n default -o jsonpath='{.spec.ports[?(@.name=="http")].nodePort}' 2>/dev/null)
 
               if [ -n "$NODE_IP" ] && [ -n "$SERVICE_NODEPORT" ]; then
                 SERVICE_URL="http://$NODE_IP:$SERVICE_NODEPORT"
