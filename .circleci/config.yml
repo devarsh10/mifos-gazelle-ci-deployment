@@ -62,9 +62,13 @@ jobs:
       - run:
           name: Start Minikube Cluster
           command: |
+            echo "Ensuring clean Minikube state before starting..."
+            minikube delete || true # Delete existing cluster if any, ignore errors
+
             echo "Starting Minikube cluster with Docker driver..."
             # Docker daemon should now be accessible via setup_remote_docker
-            minikube start --driver=docker --memory=4096mb --cpus=2 # Allocate sufficient resources for Gazelle
+            # Increased wait time for minikube start
+            minikube start --driver=docker --memory=4096mb --cpus=2 --wait=600s # Allocate sufficient resources for Gazelle and wait up to 10 minutes
 
       - run:
           name: Run Mifos Gazelle Deployment Script
