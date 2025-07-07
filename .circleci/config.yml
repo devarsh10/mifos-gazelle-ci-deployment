@@ -66,14 +66,32 @@ jobs:
           command: |
             echo "Setting up KUBECONFIG..."
             mkdir -p ~/.kube
-            sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
-            sudo chmod 600 ~/.kube/config
-            export KUBECONFIG=~/.kube/config
-            echo "KUBECONFIG set to $KUBECONFIG"
 
             echo "Starting K3s server with Docker runtime..."
             # Start k3s server in the background, using the Docker daemon provided by setup_remote_docker
             sudo k3s server --docker &
+
+            echo "Waiting for k3s.yaml to be created..."
+            # Wait for the k3s.yaml file to appear, up to 60 seconds
+            timeout 60s bash -c '
+              for i in $(seq 1 6); do
+                if [ -f /etc/rancher/k3s/k3s.yaml ]; then
+                  echo "k3s.yaml found."
+                  break
+                else
+                  echo "Attempt $i: k3s.yaml not found yet. Retrying in 10 seconds..."
+                  sleep 10
+                fi
+                if [ $i -eq 6 ]; then
+                  echo "Timeout: k3s.yaml did not appear after 60 seconds."
+                  exit 1
+                fi
+              done
+            '
+            sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+            sudo chmod 600 ~/.kube/config
+            export KUBECONFIG=~/.kube/config
+            echo "KUBECONFIG set to $KUBECONFIG"
 
             echo "Waiting for K3s server to be ready..."
             # Give k3s a moment to start its API server
