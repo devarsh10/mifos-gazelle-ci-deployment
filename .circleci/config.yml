@@ -56,85 +56,130 @@ commands:
           no_output_timeout: 45m  # Increased timeout since run.sh does everything
 
   verify_deployment:
-    description: "Verify deployment using kubectl (should be installed by run.sh)"
+    description: "Verify deployment using kubectl and check pod status"
     steps:
       - run:
-          name: Verify Mifos Gazelle deployment
+          name: Verify Mifos Gazelle deployment and pod status
           command: |
             echo "=== Verifying Mifos Gazelle Deployment ==="
             
             # Check if kubectl is available (should be installed by run.sh)
-            if command -v kubectl &> /dev/null; then
-              echo "kubectl is available"
-              
-              echo "=== Kubernetes Cluster Info ==="
-              kubectl cluster-info || echo "Could not get cluster info"
-              
-              echo "=== Checking namespaces ==="
-              kubectl get namespaces || echo "Could not get namespaces"
-              
-              echo "=== Checking all pods ==="
-              kubectl get pods --all-namespaces || echo "Could not get pods"
-              
-              echo "=== Checking services ==="
-              kubectl get svc --all-namespaces || echo "Could not get services"
-              
-              echo "=== Checking nodes ==="
-              kubectl get nodes || echo "Could not get nodes"
-            else
-              echo "kubectl not found - run.sh may not have completed successfully"
-              exit 1
-            fi
-
-  test_endpoints:
-    description: "Test deployed endpoints"
-    steps:
-      - run:
-          name: Test Mifos Gazelle endpoints
-          command: |
-            echo "=== Testing Mifos Gazelle Endpoints ==="
-            
             if ! command -v kubectl &> /dev/null; then
-              echo "kubectl not available - cannot test endpoints"
+              echo "ERROR: kubectl not found - run.sh may not have completed successfully"
               exit 1
             fi
             
-            # Get all services
-            echo "=== Available Services ==="
+            echo "kubectl is available"
+            
+            # Check if we can connect to the cluster
+            if ! kubectl cluster-info &> /dev/null; then
+              echo "ERROR: Cannot connect to Kubernetes cluster"
+              exit 1
+            fi
+            
+            echo "=== Kubernetes Cluster Info ==="
+            kubectl cluster-info
+            
+            echo "=== Checking namespaces ==="
+            kubectl get namespaces
+            
+            echo "=== Checking all pods ==="
+            kubectl get pods --all-namespaces
+            
+            echo "=== Checking services ==="
             kubectl get svc --all-namespaces
             
-            # Test basic connectivity to services
-            echo "=== Testing Service Connectivity ==="
+            echo "=== Checking nodes ==="
+            kubectl get nodes
+
+  check_pod_status:
+    description: "Check if all pods are running and ready - FAIL if not"
+    steps:
+      - run:
+          name: Verify all pods are running and ready
+          command: |
+            echo "=== Checking Pod Status - This step will FAIL if pods are not ready ==="
             
-            # Function to test a service in a namespace
-            test_service() {
+            # Function to check pod status in a namespace
+            check_namespace_pods() {
               local namespace=$1
-              local service=$2
-              local port=$3
+              local timeout=${2:-300}  # 5 minutes default timeout
               
-              if kubectl get svc -n $namespace $service &>/dev/null; then
-                echo "Testing $service in $namespace namespace..."
-                # Port forward and test
-                kubectl port-forward -n $namespace svc/$service $port:$port &
-                PID=$!
-                sleep 5
-                if curl -f --connect-timeout 10 http://localhost:$port/health 2>/dev/null; then
-                  echo "✓ $service health check passed"
-                else
-                  echo "✗ $service health check failed (may be normal if no health endpoint)"
-                fi
-                kill $PID 2>/dev/null || true
+              if ! kubectl get namespace $namespace &>/dev/null; then
+                echo "Namespace $namespace does not exist - skipping"
+                return 0
+              fi
+              
+              echo "Checking pods in namespace: $namespace"
+              
+              # Get all pods in the namespace
+              local pods=$(kubectl get pods -n $namespace --no-headers 2>/dev/null | wc -l)
+              if [ $pods -eq 0 ]; then
+                echo "No pods found in namespace $namespace"
+                return 0
+              fi
+              
+              echo "Found $pods pods in namespace $namespace"
+              kubectl get pods -n $namespace
+              
+              # Check for any pods that are not Running/Completed
+              local failed_pods=$(kubectl get pods -n $namespace --no-headers 2>/dev/null | grep -v -E "Running|Completed" | wc -l)
+              local crashloop_pods=$(kubectl get pods -n $namespace --no-headers 2>/dev/null | grep "CrashLoopBackOff" | wc -l)
+              local error_pods=$(kubectl get pods -n $namespace --no-headers 2>/dev/null | grep "Error" | wc -l)
+              local pending_pods=$(kubectl get pods -n $namespace --no-headers 2>/dev/null | grep "Pending" | wc -l)
+              local imagepull_pods=$(kubectl get pods -n $namespace --no-headers 2>/dev/null | grep "ImagePullBackOff" | wc -l)
+              
+              echo "Pod Status Summary for $namespace:"
+              echo "  - Failed pods: $failed_pods"
+              echo "  - CrashLoopBackOff pods: $crashloop_pods"
+              echo "  - Error pods: $error_pods"
+              echo "  - Pending pods: $pending_pods"
+              echo "  - ImagePullBackOff pods: $imagepull_pods"
+              
+              if [ $failed_pods -gt 0 ]; then
+                echo "❌ FAILURE: $failed_pods pods are not in Running/Completed state in namespace $namespace"
+                echo "Failed pods details:"
+                kubectl get pods -n $namespace --no-headers | grep -v -E "Running|Completed"
+                return 1
               else
-                echo "Service $service not found in namespace $namespace"
+                echo "✅ SUCCESS: All pods are Running/Completed in namespace $namespace"
+                return 0
               fi
             }
             
-            # Test common services (these may vary based on what's actually deployed)
-            test_service "mojaloop" "ml-api-adapter" "3000"
-            test_service "paymenthub" "ph-ee-connector-ams-mifos" "8080"
-            test_service "fineract" "fineract-server" "8080"
+            # Check all important namespaces
+            overall_success=true
             
-            echo "=== Endpoint Testing Completed ==="
+            echo "=== Checking vnext namespace ==="
+            if ! check_namespace_pods "vnext" 300; then
+              overall_success=false
+            fi
+            
+            echo "=== Checking paymenthub namespace ==="
+            if ! check_namespace_pods "paymenthub" 300; then
+              overall_success=false
+            fi
+            
+            echo "=== Checking mifosx namespace ==="
+            if ! check_namespace_pods "mifosx" 300; then
+              overall_success=false
+            fi
+            
+            echo "=== Checking infra namespace ==="
+            if ! check_namespace_pods "infra" 300; then
+              overall_success=false
+            fi
+            
+            # Final status
+            if [ "$overall_success" = true ]; then
+              echo "🎉 SUCCESS: All Mifos Gazelle pods are running successfully!"
+              exit 0
+            else
+              echo "💥 FAILURE: Some Mifos Gazelle pods are not running properly!"
+              echo "=== Final Pod Status Summary ==="
+              kubectl get pods --all-namespaces | grep -v "Running\|Completed" || echo "No failed pods found"
+              exit 1
+            fi
 
 # Define jobs for different architectures
 jobs:
@@ -149,7 +194,7 @@ jobs:
           apps: "all"
           debug: true
       - verify_deployment
-      - test_endpoints
+      - check_pod_status
       - run:
           name: Generate deployment report
           command: |
@@ -160,7 +205,8 @@ jobs:
             echo "" >> deployment_report_amd64.txt
             
             if command -v kubectl &> /dev/null; then
-              echo "Kubernetes Version: $(kubectl version --short 2>/dev/null || echo 'Could not get version')" >> deployment_report_amd64.txt
+              echo "Kubernetes Version: $(kubectl version --client --short 2>/dev/null || echo 'Could not get kubectl version')" >> deployment_report_amd64.txt
+              echo "Cluster Info: $(kubectl cluster-info --request-timeout=5s 2>/dev/null | head -1 || echo 'Could not get cluster info')" >> deployment_report_amd64.txt
               echo "" >> deployment_report_amd64.txt
               echo "=== Namespaces ===" >> deployment_report_amd64.txt
               kubectl get namespaces >> deployment_report_amd64.txt 2>/dev/null || echo "Could not get namespaces" >> deployment_report_amd64.txt
@@ -196,7 +242,7 @@ jobs:
           apps: "all"
           debug: true
       - verify_deployment
-      - test_endpoints
+      - check_pod_status
       - run:
           name: Generate deployment report
           command: |
@@ -207,7 +253,8 @@ jobs:
             echo "" >> deployment_report_arm64.txt
             
             if command -v kubectl &> /dev/null; then
-              echo "Kubernetes Version: $(kubectl version --short 2>/dev/null || echo 'Could not get version')" >> deployment_report_arm64.txt
+              echo "Kubernetes Version: $(kubectl version --client --short 2>/dev/null || echo 'Could not get kubectl version')" >> deployment_report_arm64.txt
+              echo "Cluster Info: $(kubectl cluster-info --request-timeout=5s 2>/dev/null | head -1 || echo 'Could not get cluster info')" >> deployment_report_arm64.txt
               echo "" >> deployment_report_arm64.txt
               echo "=== Namespaces ===" >> deployment_report_arm64.txt
               kubectl get namespaces >> deployment_report_arm64.txt 2>/dev/null || echo "Could not get namespaces" >> deployment_report_arm64.txt
