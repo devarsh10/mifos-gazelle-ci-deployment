@@ -30,8 +30,9 @@ PH_NAMESPACE="paymenthub"
 PH_RELEASE_NAME="phee"
 PH_VALUES_FILE="$CONFIG_DIR/ph_values.yaml"
 PH_REPO_LINK="https://github.com/openMF/ph-ee-env-labs.git"
-PH_EE_ENV_TEMPLATE_REPO_LINK="https://github.com/openMF/ph-ee-env-template.git"
-PH_EE_ENV_TEMPLATE_REPO_BRANCH="v1.13.0-gazelle"
+PH_EE_ENV_TEMPLATE_REPO_LINK="https://github.com/devarsh10/ph-ee-env-template.git"
+#PH_EE_ENV_TEMPLATE_REPO_BRANCH="v1.13.0-gazelle-1.1.0"
+PH_EE_ENV_TEMPLATE_REPO_BRANCH="devarsh-arm-work"
 PH_EE_ENV_TEMPLATE_REPO_DIR="ph_template"
 
 # Define Kubernetes service and MySQL connection details
@@ -49,8 +50,8 @@ SQL_FILE="$BASE_DIR/src/deployer/setup.sql"
 #MifosX 
 MIFOSX_NAMESPACE="mifosx"
 MIFOSX_MANIFESTS_DIR="$APPS_DIR/mifosx/kubernetes/manifests"
-MIFOSX_BRANCH="gazelle-1.1.0"
-MIFOSX_REPO_LINK="https://github.com/openMF/mifosx-docker.git"
+MIFOSX_BRANCH="devarsh-arm-work-mifosx"
+MIFOSX_REPO_LINK="https://github.com/devarsh10/mifosx-platform.git"
 MIFOSX_REPO_DIR="mifosx"
 
 ########################################################################
