@@ -183,6 +183,19 @@ commands:
 
 # Define jobs for different architectures
 jobs:
+
+  # --------to be removed-------
+  deploy:
+    machine: true  # Required for SSH
+    steps:
+      - checkout
+      - run:
+          name: Sleep to allow SSH
+          command: |
+            echo "Sleeping for 30 minutes. SSH into this job to debug..."
+            sleep 1800
+  # --------this-------------
+  
   deploy-test-amd64:
     machine:
       image: ubuntu-2004:current
