@@ -204,7 +204,7 @@ jobs:
       - checkout
       - basic_system_setup
       - deploy_mifos_gazelle:
-          apps: "all"
+          apps: "phee"
           debug: true
       - verify_deployment
       - check_pod_status
