@@ -1,332 +1,73 @@
 version: 2.1
 
-# Define custom commands for minimal setup
 commands:
-  basic_system_setup:
-    description: "Basic system setup and verification"
+  deploy_and_verify:
+    description: "Deploy Mifos Gazelle and verify health"
     steps:
       - run:
-          name: System information and basic setup
+          name: Deploy via run.sh
           command: |
-            echo "=== System Information ==="
-            echo "Architecture: $(uname -m)"
-            echo "OS: $(lsb_release -d)"
-            echo "Kernel: $(uname -r)"
-            echo "CPU cores: $(nproc)"
-            echo "Memory: $(free -h | grep '^Mem:' | awk '{print $2}')"
-            echo "Disk space: $(df -h / | tail -1 | awk '{print $4}')"
-            
-            # Update package manager
-            sudo apt-get update
-            
-            # Install only absolutely essential tools that run.sh might need
-            sudo apt-get install -y curl wget git
-
-  deploy_mifos_gazelle:
-    description: "Deploy Mifos Gazelle using run.sh script - let it handle everything"
-    parameters:
-      apps:
-        type: string
-        default: "all"
-        description: "Apps to deploy (vnext|phee|mifosx|all)"
-      debug:
-        type: boolean
-        default: true
-        description: "Enable debug mode"
-    steps:
-      - run:
-          name: Deploy Mifos Gazelle with run.sh
-          command: |
-            # Make the run script executable
             chmod +x ./run.sh
-            
-            # Let run.sh handle all the heavy lifting
-            echo "=== Starting Mifos Gazelle Deployment ==="
-            echo "Apps to deploy: << parameters.apps >>"
-            echo "Debug mode: << parameters.debug >>"
-            echo "User: $USER"
-            echo "Architecture: $(uname -m)"
-            
-            # Deploy using run.sh - this should handle k3s, helm, etc.
-            if [[ "<< parameters.debug >>" == "true" ]]; then
-              sudo ./run.sh -m deploy -u $USER -a << parameters.apps >> -d true
-            else
-              sudo ./run.sh -m deploy -u $USER -a << parameters.apps >>
-            fi
-          no_output_timeout: 45m  # Increased timeout since run.sh does everything
+            echo "Deploying on $(uname -m)..."
+            ./run.sh -m deploy -u "$USER" -a all -d true
 
-  verify_deployment:
-    description: "Verify deployment using kubectl and check pod status"
-    steps:
       - run:
-          name: Verify Mifos Gazelle deployment and pod status
+          name: Verify pods are running
           command: |
-            echo "=== Verifying Mifos Gazelle Deployment ==="
-            
-            # Check if kubectl is available (should be installed by run.sh)
+            echo "Checking pod readiness..."
             if ! command -v kubectl &> /dev/null; then
-              echo "ERROR: kubectl not found - run.sh may not have completed successfully"
-              exit 1
+              echo "ERROR: kubectl not found"; exit 1
             fi
-            
-            echo "kubectl is available"
-            
-            # Check if we can connect to the cluster
             if ! kubectl cluster-info &> /dev/null; then
-              echo "ERROR: Cannot connect to Kubernetes cluster"
-              exit 1
+              echo "ERROR: Cannot connect to cluster"; exit 1
             fi
-            
-            echo "=== Kubernetes Cluster Info ==="
-            kubectl cluster-info
-            
-            echo "=== Checking namespaces ==="
-            kubectl get namespaces
-            
-            echo "=== Checking all pods ==="
-            kubectl get pods --all-namespaces
-            
-            echo "=== Checking services ==="
-            kubectl get svc --all-namespaces
-            
-            echo "=== Checking nodes ==="
-            kubectl get nodes
 
-  check_pod_status:
-    description: "Check if all pods are running and ready - FAIL if not"
-    steps:
+            timeout=300
+            while [[ $timeout -gt 0 ]]; do
+              not_ready=$(kubectl get pods --all-namespaces --no-headers | \
+                awk '$3 != "Running" && $3 != "Completed" {print}')
+              if [[ -z "$not_ready" ]]; then
+                echo "All pods are running"; break
+              fi
+              echo "Waiting for pods... ($timeout s left)"
+              sleep 10
+              timeout=$((timeout - 10))
+            done
+
+            if [[ -n "$not_ready" ]]; then
+              echo "Failure: Some pods are not ready"; echo "$not_ready"; exit 1
+            fi
+
       - run:
-          name: Verify all pods are running and ready
+          name: Health check
           command: |
-            echo "=== Checking Pod Status - This step will FAIL if pods are not ready ==="
-            
-            # Function to check pod status in a namespace
-            check_namespace_pods() {
-              local namespace=$1
-              local timeout=${2:-300}  # 5 minutes default timeout
-              
-              if ! kubectl get namespace $namespace &>/dev/null; then
-                echo "Namespace $namespace does not exist - skipping"
-                return 0
-              fi
-              
-              echo "Checking pods in namespace: $namespace"
-              
-              # Get all pods in the namespace
-              local pods=$(kubectl get pods -n $namespace --no-headers 2>/dev/null | wc -l)
-              if [ $pods -eq 0 ]; then
-                echo "No pods found in namespace $namespace"
-                return 0
-              fi
-              
-              echo "Found $pods pods in namespace $namespace"
-              kubectl get pods -n $namespace
-              
-              # Check for any pods that are not Running/Completed
-              local failed_pods=$(kubectl get pods -n $namespace --no-headers 2>/dev/null | grep -v -E "Running|Completed" | wc -l)
-              local crashloop_pods=$(kubectl get pods -n $namespace --no-headers 2>/dev/null | grep "CrashLoopBackOff" | wc -l)
-              local error_pods=$(kubectl get pods -n $namespace --no-headers 2>/dev/null | grep "Error" | wc -l)
-              local pending_pods=$(kubectl get pods -n $namespace --no-headers 2>/dev/null | grep "Pending" | wc -l)
-              local imagepull_pods=$(kubectl get pods -n $namespace --no-headers 2>/dev/null | grep "ImagePullBackOff" | wc -l)
-              
-              echo "Pod Status Summary for $namespace:"
-              echo "  - Failed pods: $failed_pods"
-              echo "  - CrashLoopBackOff pods: $crashloop_pods"
-              echo "  - Error pods: $error_pods"
-              echo "  - Pending pods: $pending_pods"
-              echo "  - ImagePullBackOff pods: $imagepull_pods"
-              
-              if [ $failed_pods -gt 0 ]; then
-                echo "❌ FAILURE: $failed_pods pods are not in Running/Completed state in namespace $namespace"
-                echo "Failed pods details:"
-                kubectl get pods -n $namespace --no-headers | grep -v -E "Running|Completed"
-                return 1
-              else
-                echo "✅ SUCCESS: All pods are Running/Completed in namespace $namespace"
-                return 0
-              fi
-            }
-            
-            # Check all important namespaces
-            overall_success=true
-            
-            echo "=== Checking vnext namespace ==="
-            if ! check_namespace_pods "vnext" 300; then
-              overall_success=false
-            fi
-            
-            echo "=== Checking paymenthub namespace ==="
-            if ! check_namespace_pods "paymenthub" 300; then
-              overall_success=false
-            fi
-            
-            echo "=== Checking mifosx namespace ==="
-            if ! check_namespace_pods "mifosx" 300; then
-              overall_success=false
-            fi
-            
-            echo "=== Checking infra namespace ==="
-            if ! check_namespace_pods "infra" 300; then
-              overall_success=false
-            fi
-            
-            # Final status
-            if [ "$overall_success" = true ]; then
-              echo "🎉 SUCCESS: All Mifos Gazelle pods are running successfully!"
-              exit 0
+            echo "Running health check..."
+            if curl -sf http://localhost:8080/health; then
+              echo "Health check passed"
             else
-              echo "💥 FAILURE: Some Mifos Gazelle pods are not running properly!"
-              echo "=== Final Pod Status Summary ==="
-              kubectl get pods --all-namespaces | grep -v "Running\|Completed" || echo "No failed pods found"
-              exit 1
+              echo "Health check failed"; exit 1
             fi
 
-# Define jobs for different architectures
 jobs:
-
-  # --------to be removed-------
-  deploy:
-    machine: true  # Required for SSH
-    steps:
-      - checkout
-      - run:
-          name: Sleep to allow SSH
-          command: |
-            echo "Sleeping for 30 minutes. SSH into this job to debug..."
-            sleep 1800
-  # --------this-------------
-  
   deploy-test-amd64:
     machine:
       image: ubuntu-2004:current
     resource_class: large
     steps:
       - checkout
-      - basic_system_setup
-      - deploy_mifos_gazelle:
-          apps: "phee"
-          debug: true
-      - verify_deployment
-      - check_pod_status
-      - run:
-          name: Generate deployment report
-          command: |
-            echo "=== Mifos Gazelle Deployment Report (AMD64) ===" > deployment_report_amd64.txt
-            echo "Deployment Date: $(date)" >> deployment_report_amd64.txt
-            echo "Architecture: $(uname -m)" >> deployment_report_amd64.txt
-            echo "OS: $(lsb_release -d)" >> deployment_report_amd64.txt
-            echo "" >> deployment_report_amd64.txt
-            
-            if command -v kubectl &> /dev/null; then
-              echo "Kubernetes Version: $(kubectl version --client --short 2>/dev/null || echo 'Could not get kubectl version')" >> deployment_report_amd64.txt
-              echo "Cluster Info: $(kubectl cluster-info --request-timeout=5s 2>/dev/null | head -1 || echo 'Could not get cluster info')" >> deployment_report_amd64.txt
-              echo "" >> deployment_report_amd64.txt
-              echo "=== Namespaces ===" >> deployment_report_amd64.txt
-              kubectl get namespaces >> deployment_report_amd64.txt 2>/dev/null || echo "Could not get namespaces" >> deployment_report_amd64.txt
-              echo "" >> deployment_report_amd64.txt
-              echo "=== All Pods ===" >> deployment_report_amd64.txt
-              kubectl get pods --all-namespaces >> deployment_report_amd64.txt 2>/dev/null || echo "Could not get pods" >> deployment_report_amd64.txt
-              echo "" >> deployment_report_amd64.txt
-              echo "=== All Services ===" >> deployment_report_amd64.txt
-              kubectl get svc --all-namespaces >> deployment_report_amd64.txt 2>/dev/null || echo "Could not get services" >> deployment_report_amd64.txt
-            else
-              echo "kubectl not available - deployment may have failed" >> deployment_report_amd64.txt
-            fi
-            
-            cat deployment_report_amd64.txt
-      - store_artifacts:
-          path: deployment_report_amd64.txt
-      - run:
-          name: Optional cleanup
-          command: |
-            echo "Deployment completed on AMD64. To cleanup:"
-            echo "sudo ./run.sh -m cleanapps -u $USER -d true  # Clean apps only"
-            echo "sudo ./run.sh -m cleanall -u $USER -d true   # Clean everything"
-          when: always
+      - deploy_and_verify
 
   deploy-test-arm64:
     machine:
       image: ubuntu-2004:current
-    resource_class: arm.large  # ARM64 resource class
+    resource_class: arm.large
     steps:
       - checkout
-      - basic_system_setup
-      - deploy_mifos_gazelle:
-          apps: "all"
-          debug: true
-      - verify_deployment
-      - check_pod_status
-      - run:
-          name: Generate deployment report
-          command: |
-            echo "=== Mifos Gazelle Deployment Report (ARM64) ===" > deployment_report_arm64.txt
-            echo "Deployment Date: $(date)" >> deployment_report_arm64.txt
-            echo "Architecture: $(uname -m)" >> deployment_report_arm64.txt
-            echo "OS: $(lsb_release -d)" >> deployment_report_arm64.txt
-            echo "" >> deployment_report_arm64.txt
-            
-            if command -v kubectl &> /dev/null; then
-              echo "Kubernetes Version: $(kubectl version --client --short 2>/dev/null || echo 'Could not get kubectl version')" >> deployment_report_arm64.txt
-              echo "Cluster Info: $(kubectl cluster-info --request-timeout=5s 2>/dev/null | head -1 || echo 'Could not get cluster info')" >> deployment_report_arm64.txt
-              echo "" >> deployment_report_arm64.txt
-              echo "=== Namespaces ===" >> deployment_report_arm64.txt
-              kubectl get namespaces >> deployment_report_arm64.txt 2>/dev/null || echo "Could not get namespaces" >> deployment_report_arm64.txt
-              echo "" >> deployment_report_arm64.txt
-              echo "=== All Pods ===" >> deployment_report_arm64.txt
-              kubectl get pods --all-namespaces >> deployment_report_arm64.txt 2>/dev/null || echo "Could not get pods" >> deployment_report_arm64.txt
-              echo "" >> deployment_report_arm64.txt
-              echo "=== All Services ===" >> deployment_report_arm64.txt
-              kubectl get svc --all-namespaces >> deployment_report_arm64.txt 2>/dev/null || echo "Could not get services" >> deployment_report_arm64.txt
-            else
-              echo "kubectl not available - deployment may have failed" >> deployment_report_arm64.txt
-            fi
-            
-            cat deployment_report_arm64.txt
-      - store_artifacts:
-          path: deployment_report_arm64.txt
-      - run:
-          name: Optional cleanup
-          command: |
-            echo "Deployment completed on ARM64. To cleanup:"
-            echo "sudo ./run.sh -m cleanapps -u $USER -d true  # Clean apps only"
-            echo "sudo ./run.sh -m cleanall -u $USER -d true   # Clean everything"
-          when: always
+      - deploy_and_verify
 
-# Define workflows
 workflows:
   version: 2
   test-multi-arch:
     jobs:
-      - deploy-test-amd64:
-          filters:
-            branches:
-              only:
-                - main
-                - develop
-                - /^feature\/.*/
-                - /^hotfix\/.*/
-      - deploy-test-arm64:
-          filters:
-            branches:
-              only:
-                - main
-                - develop
-                - /^feature\/.*/
-                - /^hotfix\/.*/
-
-  # Alternative: Test one architecture at a time
-  test-amd64-only:
-    jobs:
-      - deploy-test-amd64:
-          filters:
-            branches:
-              only:
-                - /^test-amd64\/.*/
-
-  test-arm64-only:
-    jobs:
-      - deploy-test-arm64:
-          filters:
-            branches:
-              only:
-                - /^test-arm64\/.*/
+      - deploy-test-amd64
+      - deploy-test-arm64
