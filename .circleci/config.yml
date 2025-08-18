@@ -9,7 +9,7 @@ commands:
           command: |
             chmod +x ./run.sh
             echo "Deploying on $(uname -m)..."
-            ./run.sh -m deploy -u "$USER" -a all -d true
+            sudo ./run.sh -m deploy -u "$USER" -a all -d true
 
       - run:
           name: Verify pods are running
